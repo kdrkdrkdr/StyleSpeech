@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import os
-import argparse
 import librosa
 import re
 import json
@@ -12,10 +11,9 @@ from models.StyleSpeech import StyleSpeech
 from text import text_to_sequence
 import audio as Audio
 import utils
-
+from scipy.io.wavfile import write
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 def read_lexicon(lex_path):
     lexicon = {}
@@ -27,7 +25,6 @@ def read_lexicon(lex_path):
             if word.lower() not in lexicon:
                 lexicon[word.lower()] = phones
     return lexicon
-
 
 def preprocess_english(text, lexicon_path):
     text = text.rstrip(punctuation)
@@ -51,7 +48,6 @@ def preprocess_english(text, lexicon_path):
 
     return torch.from_numpy(sequence).to(device=device)
 
-
 def preprocess_audio(audio_file, _stft):
     wav, sample_rate = librosa.load(audio_file, sr=None)
     if sample_rate != 16000:
@@ -59,59 +55,47 @@ def preprocess_audio(audio_file, _stft):
     mel_spectrogram, _ = Audio.tools.get_mel_from_wav(wav, _stft)
     return torch.from_numpy(mel_spectrogram).to(device=device)
 
-
 def get_StyleSpeech(config, checkpoint_path):
     model = StyleSpeech(config).to(device=device)
     model.load_state_dict(torch.load(checkpoint_path)['model'])
     model.eval()
     return model
 
-
 def synthesize(args, model, _stft):   
-    # preprocess audio and text
-    ref_mel = preprocess_audio(args.ref_audio, _stft).transpose(0,1).unsqueeze(0)
-    src = preprocess_english(args.text, args.lexicon_path).unsqueeze(0)
+    ref_mel = preprocess_audio(args['ref_audio'], _stft).transpose(0,1).unsqueeze(0)
+    src = preprocess_english(args['text'], args['lexicon_path']).unsqueeze(0)
     src_len = torch.from_numpy(np.array([src.shape[1]])).to(device=device)
     
-    save_path = args.save_path
+    save_path = args['save_path']
     if not os.path.exists(save_path):
         os.makedirs(save_path, exist_ok=True)
 
-    # Extract style vector
     style_vector = model.get_style_vector(ref_mel)
-
-    # Forward
     mel_output = model.inference(style_vector, src, src_len)[0]
-    
     mel_ref_ = ref_mel.cpu().squeeze().transpose(0, 1).detach()
     mel_ = mel_output.cpu().squeeze().transpose(0, 1).detach()
 
-    # plotting
     utils.plot_data([mel_ref_.numpy(), mel_.numpy()], 
         ['Ref Spectrogram', 'Synthesized Spectrogram'], filename=os.path.join(save_path, 'plot.png'))
     print('Generate done!')
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint_path", type=str, required=True, 
-        help="Path to the pretrained model")
-    parser.add_argument('--config', default='configs/config.json')
-    parser.add_argument("--save_path", type=str, default='results/')
-    parser.add_argument("--ref_audio", type=str, required=True,
-        help="path to an reference speech audio sample")
-    parser.add_argument("--text", type=str, required=True,
-        help="raw text to synthesize")
-    parser.add_argument("--lexicon_path", type=str, default='lexicon/librispeech-lexicon.txt')
-    args = parser.parse_args()
+    # Define arguments as a dictionary
+    args = {
+        "checkpoint_path": "pretrained/meta_stylespeech.pth",
+        "config": "configs/config.json",
+        "save_path": "results/",
+        "ref_audio": "samples/0001_000352.wav",
+        "text": "What are you doing now! professor!",
+        "lexicon_path": "lexicon/librispeech-lexicon.txt"
+    }
     
-    with open(args.config) as f:
+    with open(args['config']) as f:
         data = f.read()
     json_config = json.loads(data)
     config = utils.AttrDict(json_config)
 
-    # Get model
-    model = get_StyleSpeech(config, args.checkpoint_path)
+    model = get_StyleSpeech(config, args['checkpoint_path'])
     print('model is prepared')
 
     _stft = Audio.stft.TacotronSTFT(
@@ -123,5 +107,4 @@ if __name__ == "__main__":
                 config.mel_fmin,
                 config.mel_fmax)
 
-    # Synthesize
     synthesize(args, model, _stft)
